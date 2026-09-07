@@ -12,23 +12,19 @@ from telethon.tl.custom import Button
 API_ID = int(os.getenv('API_ID', 'YOUR_API_ID'))
 API_HASH = os.getenv('API_HASH', 'YOUR_API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN')
-PORT = int(os.getenv('PORT', 8080))  # Render задаёт PORT
+PORT = int(os.getenv('PORT', 8080))
 
-# ---------- КЛИЕНТЫ ----------
-# Бот-клиент (для приёма команд)
-bot_client = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
-
-# Пользовательский клиент (для отправки сообщений от лица пользователя)
+# ---------- КЛИЕНТЫ (без автоматического старта) ----------
+bot_client = TelegramClient('bot_session', API_ID, API_HASH)
 user_client = TelegramClient('user_session', API_ID, API_HASH)
 
 # Глобальные хранилища
-user_data = {}          # данные по каждому чату (администратору)
-spam_tasks = {}         # активные задачи рассылки
-user_authorized = False # флаг авторизации пользовательского клиента
+user_data = {}
+spam_tasks = {}
+user_authorized = False
 
 # ---------- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ----------
 async def ensure_user_authorized():
-    """Проверяет, авторизован ли user_client; если нет – возвращает False."""
     global user_authorized
     if user_authorized:
         return True
@@ -161,7 +157,7 @@ async def add_template(event):
 async def process_csv(event):
     chat_id = event.chat_id
     if user_data[chat_id].get('step'):
-        return  # игнорируем, если идёт авторизация
+        return
 
     file_name = event.message.file.name if event.message.file else ''
     if not file_name.lower().endswith('.csv'):
@@ -233,7 +229,6 @@ async def spam_loop(chat_id, users, templates):
                 await asyncio.sleep(delay)
             except RPCError as e:
                 print(f"Ошибка отправки для {recipient}: {e}")
-                # Продолжаем со следующим
         if chat_id in spam_tasks:
             del spam_tasks[chat_id]
         await bot_client.send_message(chat_id, "✅ Рассылка завершена.")
@@ -264,14 +259,13 @@ async def run_web_server():
     site = web.TCPSite(runner, host='0.0.0.0', port=PORT)
     await site.start()
     print(f"Веб-сервер запущен на порту {PORT}")
-    # Бесконечно ждём, чтобы сервер не завершался
-    await asyncio.Event().wait()
+    await asyncio.Event().wait()  # держим сервер активным
 
 # ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
 async def main():
-    # Подключаем бота (уже запущен через start(bot_token))
-    await bot_client.start()
-    # Подключаем пользовательского клиента
+    # Запускаем бота с токеном
+    await bot_client.start(bot_token=BOT_TOKEN)
+    # Подключаем пользовательского клиента (без авторизации)
     await user_client.connect()
     global user_authorized
     if await user_client.is_user_authorized():
@@ -288,4 +282,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
