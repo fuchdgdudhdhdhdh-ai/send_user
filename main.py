@@ -7,7 +7,7 @@ import sys
 import logging
 from aiohttp import web
 from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError, RPCError
+from telethon.errors import SessionPasswordNeededError, RPCError, PhoneCodeExpiredError, PhoneCodeInvalidError
 from telethon.tl.custom import Button
 
 # ---------- НАСТРОЙКА ЛОГИРОВАНИЯ ----------
@@ -25,7 +25,6 @@ PORT = int(os.getenv('PORT', 8080))
 
 if not API_ID_RAW or not API_HASH or not BOT_TOKEN:
     logger.error("Не все переменные окружения заданы!")
-    logger.error(f"API_ID: {API_ID_RAW}, API_HASH: {API_HASH}, BOT_TOKEN: {BOT_TOKEN}")
     sys.exit(1)
 
 try:
@@ -66,6 +65,17 @@ async def ensure_user_authorized():
 async def start(event):
     chat_id = event.chat_id
     user_data.setdefault(chat_id, {})
+    # Если уже есть активная сессия – сразу показываем меню
+    if await ensure_user_authorized():
+        buttons = [
+            [Button.inline("📂 Загрузить CSV", b'add_users')],
+            [Button.inline("✏️ Настроить шаблоны", b'templates')],
+            [Button.inline("🚀 Запустить рассылку", b'start_spam')],
+            [Button.inline("⏹ Остановить рассылку", b'stop_spam')]
+        ]
+        await event.reply("✅ Вы уже авторизованы! Выберите действие:", buttons=buttons)
+        return
+
     await event.reply(
         "👋 Привет! Для отправки сообщений сотрудникам нужно авторизовать мой пользовательский аккаунт.\n"
         "Введите ваш номер телефона (в международном формате, например +79991234567):"
@@ -74,7 +84,6 @@ async def start(event):
 
 @bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and user_data[e.chat_id].get('step') == 'phone'))
 async def phone_input(event):
-    # Игнорируем команды (начинаются с /)
     if event.message.text.startswith('/'):
         return
     chat_id = event.chat_id
@@ -86,9 +95,17 @@ async def phone_input(event):
     try:
         if not user_client.is_connected():
             await user_client.connect()
-        await user_client.send_code_request(phone)
-        user_data[chat_id].update({'phone': phone, 'step': 'code'})
-        await event.reply("📱 Код подтверждения отправлен. Введите код (только цифры):")
+        # Отправляем запрос кода и сохраняем phone_code_hash
+        sent_code = await user_client.send_code_request(phone)
+        user_data[chat_id].update({
+            'phone': phone,
+            'phone_code_hash': sent_code.phone_code_hash,
+            'step': 'code'
+        })
+        await event.reply(
+            "📱 Код подтверждения отправлен. Введите код (только цифры):\n"
+            "Если код не пришёл, через минуту используйте /resend для повторной отправки."
+        )
     except Exception as e:
         logger.error(f"Ошибка при отправке кода: {e}", exc_info=True)
         await event.reply(f"❌ Ошибка: {str(e)}. Попробуйте ещё раз ввести номер.")
@@ -100,12 +117,14 @@ async def code_input(event):
         return
     chat_id = event.chat_id
     code = event.message.text.strip()
-    phone = user_data[chat_id].get('phone')
     if not code:
         await event.reply("❌ Код не может быть пустым. Введите код ещё раз:")
         return
+    phone = user_data[chat_id].get('phone')
+    phone_code_hash = user_data[chat_id].get('phone_code_hash')
     try:
-        await user_client.sign_in(phone, code)
+        await user_client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+        # Успешно
         user_data[chat_id].pop('step', None)
         global user_authorized
         user_authorized = True
@@ -116,12 +135,17 @@ async def code_input(event):
             [Button.inline("⏹ Остановить рассылку", b'stop_spam')]
         ]
         await event.reply("✅ Пользовательский аккаунт успешно авторизован! Выберите действие:", buttons=buttons)
+    except PhoneCodeExpiredError:
+        await event.reply("❌ Срок действия кода истёк. Запросите новый код командой /resend.")
+        # Не меняем шаг – даём пользователю возможность запросить новый код
+    except PhoneCodeInvalidError:
+        await event.reply("❌ Неверный код. Попробуйте ещё раз (код состоит из цифр).")
     except SessionPasswordNeededError:
         user_data[chat_id]['step'] = 'password'
         await event.reply("🔐 Включена двухфакторная аутентификация. Введите пароль:")
     except Exception as e:
         logger.error(f"Ошибка при входе с кодом: {e}", exc_info=True)
-        await event.reply(f"❌ Ошибка: {str(e)}. Повторите ввод кода.")
+        await event.reply(f"❌ Ошибка: {str(e)}. Повторите ввод кода или используйте /resend для нового кода.")
 
 @bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and user_data[e.chat_id].get('step') == 'password'))
 async def password_input(event):
@@ -147,6 +171,28 @@ async def password_input(event):
     except Exception as e:
         logger.error(f"Ошибка при входе с паролем: {e}", exc_info=True)
         await event.reply(f"❌ Ошибка: {str(e)}. Повторите ввод пароля.")
+
+# Команда для повторной отправки кода
+@bot_client.on(events.NewMessage(pattern='/resend'))
+async def resend_code(event):
+    chat_id = event.chat_id
+    data = user_data.get(chat_id, {})
+    if data.get('step') not in ('code', 'phone'):
+        await event.reply("❌ Сейчас нет активного запроса кода. Начните с /start.")
+        return
+    phone = data.get('phone')
+    if not phone:
+        await event.reply("❌ Номер телефона не найден. Начните с /start.")
+        return
+    try:
+        sent_code = await user_client.send_code_request(phone)
+        user_data[chat_id].update({
+            'phone_code_hash': sent_code.phone_code_hash,
+            'step': 'code'
+        })
+        await event.reply("📱 Новый код отправлен. Введите его (только цифры).")
+    except Exception as e:
+        await event.reply(f"❌ Не удалось отправить код: {str(e)}")
 
 # ---------- КНОПКИ ----------
 @bot_client.on(events.CallbackQuery(data=b'add_users'))
