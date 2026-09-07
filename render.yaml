@@ -1,9 +1,12 @@
 services:
-  bot:
-    type: web
+  - type: web
+    name: bot
     buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
-    environment:
-      API_ID: "35981014"
-      API_HASH: "4e788ed1a686308838891734a4173c48"
-      BOT_TOKEN: "8735415736:AAE72qIhErgje2egt2_1DSlpOszhDCootXY"
+    startCommand: python main.py
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
