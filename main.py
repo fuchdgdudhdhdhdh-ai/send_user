@@ -4,10 +4,18 @@ import io
 import os
 import random
 import sys
+import logging
 from aiohttp import web
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, RPCError
 from telethon.tl.custom import Button
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # ---------- ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ----------
 API_ID_RAW = os.getenv('API_ID')
@@ -15,19 +23,18 @@ API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 PORT = int(os.getenv('PORT', 8080))
 
-# Проверяем, что все переменные заданы
 if not API_ID_RAW or not API_HASH or not BOT_TOKEN:
-    print("ОШИБКА: Не все переменные окружения заданы!")
-    print(f"API_ID: {API_ID_RAW}, API_HASH: {API_HASH}, BOT_TOKEN: {BOT_TOKEN}")
+    logger.error("Не все переменные окружения заданы!")
+    logger.error(f"API_ID: {API_ID_RAW}, API_HASH: {API_HASH}, BOT_TOKEN: {BOT_TOKEN}")
     sys.exit(1)
 
 try:
     API_ID = int(API_ID_RAW)
 except ValueError:
-    print(f"ОШИБКА: API_ID должен быть числом, получено: {API_ID_RAW}")
+    logger.error(f"API_ID должен быть числом, получено: {API_ID_RAW}")
     sys.exit(1)
 
-print(f"Загружены настройки: API_ID={API_ID}, API_HASH={API_HASH[:5]}..., BOT_TOKEN={BOT_TOKEN[:5]}...")
+logger.info(f"Загружены настройки: API_ID={API_ID}, API_HASH={API_HASH[:5]}..., BOT_TOKEN={BOT_TOKEN[:5]}...")
 
 # ---------- КЛИЕНТЫ ----------
 bot_client = TelegramClient('bot_session', API_ID, API_HASH)
@@ -38,19 +45,20 @@ user_data = {}
 spam_tasks = {}
 user_authorized = False
 
-# ---------- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ----------
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
 async def ensure_user_authorized():
     global user_authorized
     if user_authorized:
         return True
     try:
-        await user_client.connect()
+        if not user_client.is_connected():
+            await user_client.connect()
         if await user_client.is_user_authorized():
             user_authorized = True
             return True
         return False
     except Exception as e:
-        print(f"Ошибка при проверке авторизации пользователя: {e}")
+        logger.error(f"Ошибка при проверке авторизации: {e}", exc_info=True)
         return False
 
 # ---------- ОБРАБОТЧИКИ БОТА ----------
@@ -68,19 +76,21 @@ async def start(event):
 async def phone_input(event):
     chat_id = event.chat_id
     phone = event.message.text.strip()
+    logger.info(f"Получен номер телефона от {chat_id}: '{phone}'")
     if not phone:
         await event.reply("❌ Номер не может быть пустым. Введите номер ещё раз:")
         return
     try:
-        # Подключаем пользовательского клиента, если ещё не подключены
         if not user_client.is_connected():
+            logger.info("Подключаем пользовательский клиент...")
             await user_client.connect()
+        logger.info(f"Отправляем запрос кода на номер {phone}")
         await user_client.send_code_request(phone)
         user_data[chat_id].update({'phone': phone, 'step': 'code'})
         await event.reply("📱 Код подтверждения отправлен. Введите код (только цифры):")
     except Exception as e:
+        logger.error(f"Ошибка при отправке кода: {e}", exc_info=True)
         await event.reply(f"❌ Ошибка: {str(e)}. Попробуйте ещё раз ввести номер.")
-        # Сбрасываем шаг, чтобы можно было повторить
         user_data[chat_id].pop('step', None)
 
 @bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and user_data[e.chat_id].get('step') == 'code'))
@@ -88,6 +98,7 @@ async def code_input(event):
     chat_id = event.chat_id
     code = event.message.text.strip()
     phone = user_data[chat_id].get('phone')
+    logger.info(f"Получен код от {chat_id}: '{code}' для номера {phone}")
     if not code:
         await event.reply("❌ Код не может быть пустым. Введите код ещё раз:")
         return
@@ -107,12 +118,14 @@ async def code_input(event):
         user_data[chat_id]['step'] = 'password'
         await event.reply("🔐 Включена двухфакторная аутентификация. Введите пароль:")
     except Exception as e:
+        logger.error(f"Ошибка при входе с кодом: {e}", exc_info=True)
         await event.reply(f"❌ Ошибка: {str(e)}. Повторите ввод кода.")
 
 @bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and user_data[e.chat_id].get('step') == 'password'))
 async def password_input(event):
     chat_id = event.chat_id
     password = event.message.text.strip()
+    logger.info(f"Получен пароль от {chat_id}")
     if not password:
         await event.reply("❌ Пароль не может быть пустым. Введите пароль ещё раз:")
         return
@@ -129,6 +142,7 @@ async def password_input(event):
         ]
         await event.reply("✅ Пользовательский аккаунт успешно авторизован! Выберите действие:", buttons=buttons)
     except Exception as e:
+        logger.error(f"Ошибка при входе с паролем: {e}", exc_info=True)
         await event.reply(f"❌ Ошибка: {str(e)}. Повторите ввод пароля.")
 
 # ---------- КНОПКИ ----------
@@ -256,7 +270,7 @@ async def spam_loop(chat_id, users, templates):
                 delay = random.uniform(10, 250)
                 await asyncio.sleep(delay)
             except RPCError as e:
-                print(f"Ошибка отправки для {recipient}: {e}")
+                logger.error(f"Ошибка отправки для {recipient}: {e}")
         if chat_id in spam_tasks:
             del spam_tasks[chat_id]
         await bot_client.send_message(chat_id, "✅ Рассылка завершена.")
@@ -286,23 +300,20 @@ async def run_web_server():
     await runner.setup()
     site = web.TCPSite(runner, host='0.0.0.0', port=PORT)
     await site.start()
-    print(f"Веб-сервер запущен на порту {PORT}")
+    logger.info(f"Веб-сервер запущен на порту {PORT}")
     await asyncio.Event().wait()
 
 # ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
 async def main():
-    # Запускаем бота с токеном
     await bot_client.start(bot_token=BOT_TOKEN)
-    # Подключаем пользовательского клиента (без авторизации)
     await user_client.connect()
     global user_authorized
     if await user_client.is_user_authorized():
         user_authorized = True
-        print("Пользовательский клиент уже авторизован (сессия восстановлена).")
+        logger.info("Пользовательский клиент уже авторизован (сессия восстановлена).")
     else:
-        print("Пользовательский клиент не авторизован – ожидаем ввода номера через /start.")
+        logger.info("Пользовательский клиент не авторизован – ожидаем ввода номера через /start.")
 
-    # Запускаем веб-сервер и бота параллельно
     await asyncio.gather(
         run_web_server(),
         bot_client.run_until_disconnected()
