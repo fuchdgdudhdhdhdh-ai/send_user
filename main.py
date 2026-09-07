@@ -1,66 +1,55 @@
-from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError, RPCError
-from telethon.tl.custom import Button
 import asyncio
-import random
 import csv
 import io
 import os
+import random
+from aiohttp import web
+from telethon import TelegramClient, events
+from telethon.errors import SessionPasswordNeededError, RPCError
+from telethon.tl.custom import Button
 
-# Переменные окружения
+# ---------- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ----------
 API_ID = int(os.getenv('API_ID', 'YOUR_API_ID'))
 API_HASH = os.getenv('API_HASH', 'YOUR_API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN')
+PORT = int(os.getenv('PORT', 8080))  # Render задаёт PORT
 
-# Бот-клиент (для команд)
+# ---------- КЛИЕНТЫ ----------
+# Бот-клиент (для приёма команд)
 bot_client = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-# Пользовательский клиент (для отправки сообщений) – создаём, но не авторизуем сразу
+# Пользовательский клиент (для отправки сообщений от лица пользователя)
 user_client = TelegramClient('user_session', API_ID, API_HASH)
 
-# Хранилище данных по каждому чату (администратору)
-user_data = {}
-# Активные задачи рассылки
-spam_tasks = {}
+# Глобальные хранилища
+user_data = {}          # данные по каждому чату (администратору)
+spam_tasks = {}         # активные задачи рассылки
+user_authorized = False # флаг авторизации пользовательского клиента
 
-# Флаг авторизации пользовательского клиента
-user_authorized = False
-
-# ---------- ХЕЛПЕРЫ ДЛЯ РАБОТЫ С ПОЛЬЗОВАТЕЛЬСКИМ КЛИЕНТОМ ----------
-async def ensure_user_authorized(phone=None, code=None, password=None):
-    """Проверяет, авторизован ли user_client; если нет – пробует войти с переданными данными."""
+# ---------- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ----------
+async def ensure_user_authorized():
+    """Проверяет, авторизован ли user_client; если нет – возвращает False."""
     global user_authorized
     if user_authorized:
         return True
     try:
-        # Если ещё не авторизованы, пробуем войти
-        if phone and code:
-            await user_client.sign_in(phone, code)
+        await user_client.connect()
+        if await user_client.is_user_authorized():
             user_authorized = True
             return True
-        elif password:
-            await user_client.sign_in(password=password)
-            user_authorized = True
-            return True
-        else:
-            # Возможно, уже есть сохранённая сессия – попробуем просто подключиться
-            await user_client.connect()
-            if await user_client.is_user_authorized():
-                user_authorized = True
-                return True
-            return False
-    except Exception as e:
-        # Если сессия невалидна, сбрасываем флаг
-        user_authorized = False
-        raise e
+        return False
+    except:
+        return False
 
 # ---------- ОБРАБОТЧИКИ БОТА ----------
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start(event):
     chat_id = event.chat_id
     user_data.setdefault(chat_id, {})
-    await event.reply("👋 Привет! Для отправки сообщений сотрудникам нужно авторизовать мой пользовательский аккаунт.\n"
-                      "Введите ваш номер телефона (в международном формате, например +79991234567):")
+    await event.reply(
+        "👋 Привет! Для отправки сообщений сотрудникам нужно авторизовать мой пользовательский аккаунт.\n"
+        "Введите ваш номер телефона (в международном формате, например +79991234567):"
+    )
     user_data[chat_id]['step'] = 'phone'
 
 @bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and user_data[e.chat_id].get('step') == 'phone'))
@@ -68,14 +57,12 @@ async def phone_input(event):
     chat_id = event.chat_id
     phone = event.message.text.strip()
     try:
-        # Отправляем запрос кода через пользовательского клиента
         await user_client.connect()
         await user_client.send_code_request(phone)
         user_data[chat_id].update({'phone': phone, 'step': 'code'})
         await event.reply("📱 Код подтверждения отправлен. Введите код (только цифры):")
     except Exception as e:
         await event.reply(f"❌ Ошибка: {str(e)}. Попробуйте ещё раз ввести номер.")
-        # Если ошибка, сбрасываем шаг
         user_data[chat_id].pop('step', None)
 
 @bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and user_data[e.chat_id].get('step') == 'code'))
@@ -85,8 +72,8 @@ async def code_input(event):
     phone = user_data[chat_id].get('phone')
     try:
         await user_client.sign_in(phone, code)
-        # Успешно
         user_data[chat_id].pop('step', None)
+        global user_authorized
         user_authorized = True
         buttons = [
             [Button.inline("📂 Загрузить CSV", b'add_users')],
@@ -94,7 +81,7 @@ async def code_input(event):
             [Button.inline("🚀 Запустить рассылку", b'start_spam')],
             [Button.inline("⏹ Остановить рассылку", b'stop_spam')]
         ]
-        await event.reply("✅ Пользовательский аккаунт успешно авторизован! Теперь выберите действие:", buttons=buttons)
+        await event.reply("✅ Пользовательский аккаунт успешно авторизован! Выберите действие:", buttons=buttons)
     except SessionPasswordNeededError:
         user_data[chat_id]['step'] = 'password'
         await event.reply("🔐 Включена двухфакторная аутентификация. Введите пароль:")
@@ -108,6 +95,7 @@ async def password_input(event):
     try:
         await user_client.sign_in(password=password)
         user_data[chat_id].pop('step', None)
+        global user_authorized
         user_authorized = True
         buttons = [
             [Button.inline("📂 Загрузить CSV", b'add_users')],
@@ -123,9 +111,11 @@ async def password_input(event):
 @bot_client.on(events.CallbackQuery(data=b'add_users'))
 async def add_users(event):
     await event.answer()
-    await event.edit("📎 Отправьте мне **CSV-файл** (с разделителем запятая).\n"
-                     "Ожидаются колонки: `username`, `user_id` (или одна из них).\n"
-                     "Если `username` пуст, буду использовать `user_id`.")
+    await event.edit(
+        "📎 Отправьте мне **CSV-файл** (с разделителем запятая).\n"
+        "Ожидаются колонки: `username`, `user_id` (или одна из них).\n"
+        "Если `username` пуст, буду использовать `user_id`."
+    )
 
 @bot_client.on(events.CallbackQuery(data=b'templates'))
 async def setup_templates(event):
@@ -141,8 +131,7 @@ async def setup_templates(event):
 @bot_client.on(events.CallbackQuery(data=b'start_spam'))
 async def start_spam_callback(event):
     await event.answer()
-    # Проверяем, авторизован ли user_client
-    if not user_authorized:
+    if not await ensure_user_authorized():
         await event.reply("❌ Сначала авторизуйте пользовательский аккаунт через /start.")
         return
     await start_spam(event)
@@ -208,7 +197,7 @@ async def process_csv(event):
 @bot_client.on(events.NewMessage(pattern='/start_spam'))
 async def start_spam(event):
     chat_id = event.chat_id
-    if not user_authorized:
+    if not await ensure_user_authorized():
         await event.reply("❌ Пользовательский аккаунт не авторизован. Сначала выполните /start и введите номер/код.")
         return
     data = user_data.get(chat_id, {})
@@ -236,7 +225,6 @@ async def spam_loop(chat_id, users, templates):
                 break
             template = random.choice(template_list)
             try:
-                # Отправляем через пользовательский клиент
                 if recipient.isdigit():
                     await user_client.send_message(int(recipient), template)
                 else:
@@ -245,7 +233,7 @@ async def spam_loop(chat_id, users, templates):
                 await asyncio.sleep(delay)
             except RPCError as e:
                 print(f"Ошибка отправки для {recipient}: {e}")
-                # Можно также уведомить администратора, но не прерываем
+                # Продолжаем со следующим
         if chat_id in spam_tasks:
             del spam_tasks[chat_id]
         await bot_client.send_message(chat_id, "✅ Рассылка завершена.")
@@ -254,7 +242,7 @@ async def spam_loop(chat_id, users, templates):
             del spam_tasks[chat_id]
         await bot_client.send_message(chat_id, "⏹ Рассылка остановлена.")
 
-# ---------- ОСТАНОВКА ----------
+# ---------- ОСТАНОВКА РАССЫЛКИ ----------
 @bot_client.on(events.NewMessage(pattern='/stop_spam'))
 async def stop_spam(event):
     chat_id = event.chat_id
@@ -264,11 +252,26 @@ async def stop_spam(event):
     else:
         await event.reply("⚠️ Активная рассылка не найдена.")
 
-# ---------- ЗАПУСК ----------
+# ---------- ВЕБ-СЕРВЕР ДЛЯ RENDER ----------
+async def health_check(request):
+    return web.Response(text="OK")
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host='0.0.0.0', port=PORT)
+    await site.start()
+    print(f"Веб-сервер запущен на порту {PORT}")
+    # Бесконечно ждём, чтобы сервер не завершался
+    await asyncio.Event().wait()
+
+# ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
 async def main():
-    # Подключаем бота (уже запущен)
+    # Подключаем бота (уже запущен через start(bot_token))
     await bot_client.start()
-    # Подключаем пользовательского клиента (попытка использовать сохранённую сессию)
+    # Подключаем пользовательского клиента
     await user_client.connect()
     global user_authorized
     if await user_client.is_user_authorized():
@@ -277,8 +280,11 @@ async def main():
     else:
         print("Пользовательский клиент не авторизован – ожидаем ввода номера через /start.")
 
-    # Запускаем бота до отключения
-    await bot_client.run_until_disconnected()
+    # Запускаем веб-сервер и бота параллельно
+    await asyncio.gather(
+        run_web_server(),
+        bot_client.run_until_disconnected()
+    )
 
 if __name__ == '__main__':
     asyncio.run(main())
