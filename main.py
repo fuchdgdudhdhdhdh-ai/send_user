@@ -10,14 +10,14 @@ from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, RPCError
 from telethon.tl.custom import Button
 
-# Настройка логирования
+# ---------- НАСТРОЙКА ЛОГИРОВАНИЯ ----------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# ---------- ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ----------
+# ---------- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ----------
 API_ID_RAW = os.getenv('API_ID')
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -34,7 +34,7 @@ except ValueError:
     logger.error(f"API_ID должен быть числом, получено: {API_ID_RAW}")
     sys.exit(1)
 
-logger.info(f"Загружены настройки: API_ID={API_ID}, API_HASH={API_HASH[:5]}..., BOT_TOKEN={BOT_TOKEN[:5]}...")
+logger.info(f"Загружены настройки: API_ID={API_ID}")
 
 # ---------- КЛИЕНТЫ ----------
 bot_client = TelegramClient('bot_session', API_ID, API_HASH)
@@ -45,7 +45,7 @@ user_data = {}
 spam_tasks = {}
 user_authorized = False
 
-# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+# ---------- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ----------
 async def ensure_user_authorized():
     global user_authorized
     if user_authorized:
@@ -74,6 +74,9 @@ async def start(event):
 
 @bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and user_data[e.chat_id].get('step') == 'phone'))
 async def phone_input(event):
+    # Игнорируем команды (начинаются с /)
+    if event.message.text.startswith('/'):
+        return
     chat_id = event.chat_id
     phone = event.message.text.strip()
     logger.info(f"Получен номер телефона от {chat_id}: '{phone}'")
@@ -82,9 +85,7 @@ async def phone_input(event):
         return
     try:
         if not user_client.is_connected():
-            logger.info("Подключаем пользовательский клиент...")
             await user_client.connect()
-        logger.info(f"Отправляем запрос кода на номер {phone}")
         await user_client.send_code_request(phone)
         user_data[chat_id].update({'phone': phone, 'step': 'code'})
         await event.reply("📱 Код подтверждения отправлен. Введите код (только цифры):")
@@ -95,10 +96,11 @@ async def phone_input(event):
 
 @bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and user_data[e.chat_id].get('step') == 'code'))
 async def code_input(event):
+    if event.message.text.startswith('/'):
+        return
     chat_id = event.chat_id
     code = event.message.text.strip()
     phone = user_data[chat_id].get('phone')
-    logger.info(f"Получен код от {chat_id}: '{code}' для номера {phone}")
     if not code:
         await event.reply("❌ Код не может быть пустым. Введите код ещё раз:")
         return
@@ -123,9 +125,10 @@ async def code_input(event):
 
 @bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and user_data[e.chat_id].get('step') == 'password'))
 async def password_input(event):
+    if event.message.text.startswith('/'):
+        return
     chat_id = event.chat_id
     password = event.message.text.strip()
-    logger.info(f"Получен пароль от {chat_id}")
     if not password:
         await event.reply("❌ Пароль не может быть пустым. Введите пароль ещё раз:")
         return
