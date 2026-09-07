@@ -5,8 +5,8 @@ services:
     startCommand: python main.py
     envVars:
       - key: API_ID
-        sync: false
+        value: 35981014
       - key: API_HASH
-        sync: false
+        value: "4e788ed1a686308838891734a4173c48"
       - key: BOT_TOKEN
-        sync: false
+        value: "8735415736:AAE72qIhErgje2egt2_1DSlpOszhDCootXY"
