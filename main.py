@@ -3,18 +3,33 @@ import csv
 import io
 import os
 import random
+import sys
 from aiohttp import web
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, RPCError
 from telethon.tl.custom import Button
 
-# ---------- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ----------
-API_ID = int(os.getenv('API_ID', 'YOUR_API_ID'))
-API_HASH = os.getenv('API_HASH', 'YOUR_API_HASH')
-BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN')
+# ---------- ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ----------
+API_ID_RAW = os.getenv('API_ID')
+API_HASH = os.getenv('API_HASH')
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 PORT = int(os.getenv('PORT', 8080))
 
-# ---------- КЛИЕНТЫ (без автоматического старта) ----------
+# Проверяем, что все переменные заданы
+if not API_ID_RAW or not API_HASH or not BOT_TOKEN:
+    print("ОШИБКА: Не все переменные окружения заданы!")
+    print(f"API_ID: {API_ID_RAW}, API_HASH: {API_HASH}, BOT_TOKEN: {BOT_TOKEN}")
+    sys.exit(1)
+
+try:
+    API_ID = int(API_ID_RAW)
+except ValueError:
+    print(f"ОШИБКА: API_ID должен быть числом, получено: {API_ID_RAW}")
+    sys.exit(1)
+
+print(f"Загружены настройки: API_ID={API_ID}, API_HASH={API_HASH[:5]}..., BOT_TOKEN={BOT_TOKEN[:5]}...")
+
+# ---------- КЛИЕНТЫ ----------
 bot_client = TelegramClient('bot_session', API_ID, API_HASH)
 user_client = TelegramClient('user_session', API_ID, API_HASH)
 
@@ -34,7 +49,8 @@ async def ensure_user_authorized():
             user_authorized = True
             return True
         return False
-    except:
+    except Exception as e:
+        print(f"Ошибка при проверке авторизации пользователя: {e}")
         return False
 
 # ---------- ОБРАБОТЧИКИ БОТА ----------
@@ -52,13 +68,19 @@ async def start(event):
 async def phone_input(event):
     chat_id = event.chat_id
     phone = event.message.text.strip()
+    if not phone:
+        await event.reply("❌ Номер не может быть пустым. Введите номер ещё раз:")
+        return
     try:
-        await user_client.connect()
+        # Подключаем пользовательского клиента, если ещё не подключены
+        if not user_client.is_connected():
+            await user_client.connect()
         await user_client.send_code_request(phone)
         user_data[chat_id].update({'phone': phone, 'step': 'code'})
         await event.reply("📱 Код подтверждения отправлен. Введите код (только цифры):")
     except Exception as e:
         await event.reply(f"❌ Ошибка: {str(e)}. Попробуйте ещё раз ввести номер.")
+        # Сбрасываем шаг, чтобы можно было повторить
         user_data[chat_id].pop('step', None)
 
 @bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and user_data[e.chat_id].get('step') == 'code'))
@@ -66,6 +88,9 @@ async def code_input(event):
     chat_id = event.chat_id
     code = event.message.text.strip()
     phone = user_data[chat_id].get('phone')
+    if not code:
+        await event.reply("❌ Код не может быть пустым. Введите код ещё раз:")
+        return
     try:
         await user_client.sign_in(phone, code)
         user_data[chat_id].pop('step', None)
@@ -88,6 +113,9 @@ async def code_input(event):
 async def password_input(event):
     chat_id = event.chat_id
     password = event.message.text.strip()
+    if not password:
+        await event.reply("❌ Пароль не может быть пустым. Введите пароль ещё раз:")
+        return
     try:
         await user_client.sign_in(password=password)
         user_data[chat_id].pop('step', None)
@@ -259,7 +287,7 @@ async def run_web_server():
     site = web.TCPSite(runner, host='0.0.0.0', port=PORT)
     await site.start()
     print(f"Веб-сервер запущен на порту {PORT}")
-    await asyncio.Event().wait()  # держим сервер активным
+    await asyncio.Event().wait()
 
 # ---------- ГЛАВНАЯ ФУНКЦИЯ ----------
 async def main():
