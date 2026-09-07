@@ -5,9 +5,9 @@ import json
 import os
 
 # Конфигурация Render.com (замените на свои данные)
-API_ID = 'YOUR_API_ID'
-API_HASH = 'YOUR_API_HASH'
-BOT_TOKEN = 'YOUR_BOT_TOKEN'
+API_ID = '35981014'
+API_HASH = '4e788ed1a686308838891734a4173c48'
+BOT_TOKEN = '8735415736:AAE72qIhErgje2egt2_1DSlpOszhDCootXY'
 
 client = TelegramClient('session_name', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
