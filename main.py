@@ -60,11 +60,23 @@ async def ensure_user_authorized():
         logger.error(f"Ошибка при проверке авторизации: {e}", exc_info=True)
         return False
 
+# ---------- СОЗДАНИЕ КЛАВИАТУРЫ ДЛЯ КОДА ----------
+def get_code_keyboard():
+    """Создаёт цифровую клавиатуру для ввода кода"""
+    buttons = [
+        [Button.inline("1", b'code_1'), Button.inline("2", b'code_2'), Button.inline("3", b'code_3')],
+        [Button.inline("4", b'code_4'), Button.inline("5", b'code_5'), Button.inline("6", b'code_6')],
+        [Button.inline("7", b'code_7'), Button.inline("8", b'code_8'), Button.inline("9", b'code_9')],
+        [Button.inline("0", b'code_0'), Button.inline("⌫", b'code_backspace'), Button.inline("✓", b'code_confirm')]
+    ]
+    return buttons
+
 # ---------- ОБРАБОТЧИКИ БОТА ----------
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start(event):
     chat_id = event.chat_id
     user_data.setdefault(chat_id, {})
+    
     # Если уже есть активная сессия – сразу показываем меню
     if await ensure_user_authorized():
         buttons = [
@@ -77,8 +89,10 @@ async def start(event):
         return
 
     await event.reply(
-        "👋 Привет! Для отправки сообщений сотрудникам нужно авторизовать мой пользовательский аккаунт.\n"
-        "Введите ваш номер телефона (в международном формате, например +79991234567):"
+        "👋 Привет! Для отправки сообщений сотрудникам нужно авторизовать пользовательский аккаунт.\n\n"
+        "⚠️ **Важно:** Используйте номер телефона, который НЕ является владельцем этого бота.\n"
+        "Например, корпоративный аккаунт или другой ваш аккаунт.\n\n"
+        "Введите номер телефона (в международном формате, например +79991234567):"
     )
     user_data[chat_id]['step'] = 'phone'
 
@@ -95,57 +109,210 @@ async def phone_input(event):
     try:
         if not user_client.is_connected():
             await user_client.connect()
-        # Отправляем запрос кода и сохраняем phone_code_hash
+        
+        # Отправляем запрос кода
         sent_code = await user_client.send_code_request(phone)
         user_data[chat_id].update({
             'phone': phone,
             'phone_code_hash': sent_code.phone_code_hash,
-            'step': 'code'
+            'step': 'code',
+            'code_input': ''  # для накопления вводимого кода
         })
+        
+        # Отправляем сообщение с клавиатурой для ввода кода
         await event.reply(
-            "📱 Код подтверждения отправлен. Введите код (только цифры):\n"
-            "Если код не пришёл, через минуту используйте /resend для повторной отправки."
+            "📱 Код подтверждения отправлен.\n\n"
+            "Введите код с помощью кнопок ниже (6 цифр):\n"
+            f"Код: `{''}`",
+            buttons=get_code_keyboard()
         )
     except Exception as e:
         logger.error(f"Ошибка при отправке кода: {e}", exc_info=True)
         await event.reply(f"❌ Ошибка: {str(e)}. Попробуйте ещё раз ввести номер.")
         user_data[chat_id].pop('step', None)
 
-@bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and user_data[e.chat_id].get('step') == 'code'))
-async def code_input(event):
-    if event.message.text.startswith('/'):
-        return
+# ---------- ОБРАБОТКА КНОПОК ДЛЯ КОДА ----------
+@bot_client.on(events.CallbackQuery(data=b'code_0'))
+async def code_0(event):
+    await handle_code_input(event, '0')
+
+@bot_client.on(events.CallbackQuery(data=b'code_1'))
+async def code_1(event):
+    await handle_code_input(event, '1')
+
+@bot_client.on(events.CallbackQuery(data=b'code_2'))
+async def code_2(event):
+    await handle_code_input(event, '2')
+
+@bot_client.on(events.CallbackQuery(data=b'code_3'))
+async def code_3(event):
+    await handle_code_input(event, '3')
+
+@bot_client.on(events.CallbackQuery(data=b'code_4'))
+async def code_4(event):
+    await handle_code_input(event, '4')
+
+@bot_client.on(events.CallbackQuery(data=b'code_5'))
+async def code_5(event):
+    await handle_code_input(event, '5')
+
+@bot_client.on(events.CallbackQuery(data=b'code_6'))
+async def code_6(event):
+    await handle_code_input(event, '6')
+
+@bot_client.on(events.CallbackQuery(data=b'code_7'))
+async def code_7(event):
+    await handle_code_input(event, '7')
+
+@bot_client.on(events.CallbackQuery(data=b'code_8'))
+async def code_8(event):
+    await handle_code_input(event, '8')
+
+@bot_client.on(events.CallbackQuery(data=b'code_9'))
+async def code_9(event):
+    await handle_code_input(event, '9')
+
+@bot_client.on(events.CallbackQuery(data=b'code_backspace'))
+async def code_backspace(event):
     chat_id = event.chat_id
-    code = event.message.text.strip()
-    if not code:
-        await event.reply("❌ Код не может быть пустым. Введите код ещё раз:")
+    data = user_data.get(chat_id, {})
+    if data.get('step') != 'code':
+        await event.answer("Сейчас нет активного запроса кода", alert=True)
         return
-    phone = user_data[chat_id].get('phone')
-    phone_code_hash = user_data[chat_id].get('phone_code_hash')
+    
+    current = data.get('code_input', '')
+    if current:
+        data['code_input'] = current[:-1]
+    
+    await event.answer()
+    await event.edit(
+        f"📱 Код подтверждения отправлен.\n\n"
+        f"Введите код с помощью кнопок ниже (6 цифр):\n"
+        f"Код: `{data['code_input']}`",
+        buttons=get_code_keyboard()
+    )
+
+@bot_client.on(events.CallbackQuery(data=b'code_confirm'))
+async def code_confirm(event):
+    chat_id = event.chat_id
+    data = user_data.get(chat_id, {})
+    if data.get('step') != 'code':
+        await event.answer("Сейчас нет активного запроса кода", alert=True)
+        return
+    
+    code = data.get('code_input', '')
+    if len(code) < 4:
+        await event.answer("Код должен содержать минимум 4 цифры", alert=True)
+        return
+    
+    await event.answer()
+    await process_code_input(event, code)
+
+async def handle_code_input(event, digit):
+    chat_id = event.chat_id
+    data = user_data.get(chat_id, {})
+    if data.get('step') != 'code':
+        await event.answer("Сейчас нет активного запроса кода", alert=True)
+        return
+    
+    current = data.get('code_input', '')
+    if len(current) >= 6:
+        await event.answer("Код уже содержит 6 цифр. Нажмите ✓ для подтверждения или ⌫ для удаления", alert=True)
+        return
+    
+    data['code_input'] = current + digit
+    
+    await event.answer()
+    await event.edit(
+        f"📱 Код подтверждения отправлен.\n\n"
+        f"Введите код с помощью кнопок ниже (6 цифр):\n"
+        f"Код: `{data['code_input']}`",
+        buttons=get_code_keyboard()
+    )
+
+async def process_code_input(event, code):
+    chat_id = event.chat_id
+    data = user_data.get(chat_id, {})
+    phone = data.get('phone')
+    phone_code_hash = data.get('phone_code_hash')
+    
     try:
         await user_client.sign_in(phone, code, phone_code_hash=phone_code_hash)
         # Успешно
-        user_data[chat_id].pop('step', None)
+        data.pop('step', None)
+        data.pop('code_input', None)
         global user_authorized
         user_authorized = True
+        
         buttons = [
             [Button.inline("📂 Загрузить CSV", b'add_users')],
             [Button.inline("✏️ Настроить шаблоны", b'templates')],
             [Button.inline("🚀 Запустить рассылку", b'start_spam')],
             [Button.inline("⏹ Остановить рассылку", b'stop_spam')]
         ]
-        await event.reply("✅ Пользовательский аккаунт успешно авторизован! Выберите действие:", buttons=buttons)
+        await event.edit(
+            "✅ Пользовательский аккаунт успешно авторизован! Выберите действие:",
+            buttons=buttons
+        )
     except PhoneCodeExpiredError:
-        await event.reply("❌ Срок действия кода истёк. Запросите новый код командой /resend.")
-        # Не меняем шаг – даём пользователю возможность запросить новый код
+        await event.edit(
+            "❌ Срок действия кода истёк.\n\n"
+            "Нажмите /resend для получения нового кода."
+        )
     except PhoneCodeInvalidError:
-        await event.reply("❌ Неверный код. Попробуйте ещё раз (код состоит из цифр).")
+        data['code_input'] = ''
+        await event.edit(
+            f"❌ Неверный код. Попробуйте ещё раз.\n\n"
+            f"Введите код с помощью кнопок ниже (6 цифр):\n"
+            f"Код: `{''}`",
+            buttons=get_code_keyboard()
+        )
     except SessionPasswordNeededError:
-        user_data[chat_id]['step'] = 'password'
-        await event.reply("🔐 Включена двухфакторная аутентификация. Введите пароль:")
+        data['step'] = 'password'
+        await event.edit(
+            "🔐 Включена двухфакторная аутентификация.\n"
+            "Введите пароль (отправьте текстом):"
+        )
     except Exception as e:
         logger.error(f"Ошибка при входе с кодом: {e}", exc_info=True)
-        await event.reply(f"❌ Ошибка: {str(e)}. Повторите ввод кода или используйте /resend для нового кода.")
+        data['code_input'] = ''
+        await event.edit(
+            f"❌ Ошибка: {str(e)}\n\n"
+            f"Попробуйте ещё раз или используйте /resend для нового кода.\n"
+            f"Введите код с помощью кнопок ниже (6 цифр):\n"
+            f"Код: `{''}`",
+            buttons=get_code_keyboard()
+        )
+
+# ---------- ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ----------
+
+# Команда для повторной отправки кода
+@bot_client.on(events.NewMessage(pattern='/resend'))
+async def resend_code(event):
+    chat_id = event.chat_id
+    data = user_data.get(chat_id, {})
+    if data.get('step') not in ('code', 'phone'):
+        await event.reply("❌ Сейчас нет активного запроса кода. Начните с /start.")
+        return
+    phone = data.get('phone')
+    if not phone:
+        await event.reply("❌ Номер телефона не найден. Начните с /start.")
+        return
+    try:
+        sent_code = await user_client.send_code_request(phone)
+        data.update({
+            'phone_code_hash': sent_code.phone_code_hash,
+            'step': 'code',
+            'code_input': ''
+        })
+        await event.reply(
+            "📱 Новый код отправлен.\n\n"
+            "Введите код с помощью кнопок ниже (6 цифр):\n"
+            f"Код: `{''}`",
+            buttons=get_code_keyboard()
+        )
+    except Exception as e:
+        await event.reply(f"❌ Не удалось отправить код: {str(e)}")
 
 @bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and user_data[e.chat_id].get('step') == 'password'))
 async def password_input(event):
@@ -172,29 +339,7 @@ async def password_input(event):
         logger.error(f"Ошибка при входе с паролем: {e}", exc_info=True)
         await event.reply(f"❌ Ошибка: {str(e)}. Повторите ввод пароля.")
 
-# Команда для повторной отправки кода
-@bot_client.on(events.NewMessage(pattern='/resend'))
-async def resend_code(event):
-    chat_id = event.chat_id
-    data = user_data.get(chat_id, {})
-    if data.get('step') not in ('code', 'phone'):
-        await event.reply("❌ Сейчас нет активного запроса кода. Начните с /start.")
-        return
-    phone = data.get('phone')
-    if not phone:
-        await event.reply("❌ Номер телефона не найден. Начните с /start.")
-        return
-    try:
-        sent_code = await user_client.send_code_request(phone)
-        user_data[chat_id].update({
-            'phone_code_hash': sent_code.phone_code_hash,
-            'step': 'code'
-        })
-        await event.reply("📱 Новый код отправлен. Введите его (только цифры).")
-    except Exception as e:
-        await event.reply(f"❌ Не удалось отправить код: {str(e)}")
-
-# ---------- КНОПКИ ----------
+# ---------- КНОПКИ МЕНЮ ----------
 @bot_client.on(events.CallbackQuery(data=b'add_users'))
 async def add_users(event):
     await event.answer()
