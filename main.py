@@ -44,7 +44,7 @@ user_data = {}
 spam_tasks = {}
 user_authorized = False
 
-# ---------- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ----------
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
 async def ensure_user_authorized():
     global user_authorized
     if user_authorized:
@@ -60,6 +60,33 @@ async def ensure_user_authorized():
         logger.error(f"Ошибка при проверке авторизации: {e}", exc_info=True)
         return False
 
+def logout_user(chat_id):
+    """Выход из аккаунта: удаление сессии и сброс данных"""
+    global user_authorized
+    try:
+        # Отключаем клиент
+        if user_client.is_connected():
+            asyncio.create_task(user_client.disconnect())
+        
+        # Удаляем файл сессии
+        session_file = 'user_session.session'
+        if os.path.exists(session_file):
+            os.remove(session_file)
+            logger.info(f"Файл сессии {session_file} удалён")
+        
+        # Сбрасываем флаг авторизации
+        user_authorized = False
+        
+        # Очищаем данные пользователя
+        if chat_id in user_data:
+            user_data[chat_id] = {}
+        
+        logger.info(f"Пользователь {chat_id} вышел из аккаунта")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при выходе: {e}", exc_info=True)
+        return False
+
 # ---------- СОЗДАНИЕ КЛАВИАТУРЫ ДЛЯ КОДА ----------
 def get_code_keyboard():
     """Создаёт цифровую клавиатуру для ввода кода"""
@@ -71,6 +98,17 @@ def get_code_keyboard():
     ]
     return buttons
 
+def get_main_menu():
+    """Создаёт главное меню с кнопками"""
+    buttons = [
+        [Button.inline("📂 Загрузить CSV", b'add_users')],
+        [Button.inline("✏️ Настроить шаблоны", b'templates')],
+        [Button.inline("🚀 Запустить рассылку", b'start_spam')],
+        [Button.inline("⏹ Остановить рассылку", b'stop_spam')],
+        [Button.inline("🚪 Выйти из аккаунта", b'logout')]
+    ]
+    return buttons
+
 # ---------- ОБРАБОТЧИКИ БОТА ----------
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start(event):
@@ -79,13 +117,7 @@ async def start(event):
     
     # Если уже есть активная сессия – сразу показываем меню
     if await ensure_user_authorized():
-        buttons = [
-            [Button.inline("📂 Загрузить CSV", b'add_users')],
-            [Button.inline("✏️ Настроить шаблоны", b'templates')],
-            [Button.inline("🚀 Запустить рассылку", b'start_spam')],
-            [Button.inline("⏹ Остановить рассылку", b'stop_spam')]
-        ]
-        await event.reply("✅ Вы уже авторизованы! Выберите действие:", buttons=buttons)
+        await event.reply("✅ Вы уже авторизованы! Выберите действие:", buttons=get_main_menu())
         return
 
     await event.reply(
@@ -244,15 +276,9 @@ async def process_code_input(event, code):
         global user_authorized
         user_authorized = True
         
-        buttons = [
-            [Button.inline("📂 Загрузить CSV", b'add_users')],
-            [Button.inline("✏️ Настроить шаблоны", b'templates')],
-            [Button.inline("🚀 Запустить рассылку", b'start_spam')],
-            [Button.inline("⏹ Остановить рассылку", b'stop_spam')]
-        ]
         await event.edit(
             "✅ Пользовательский аккаунт успешно авторизован! Выберите действие:",
-            buttons=buttons
+            buttons=get_main_menu()
         )
     except PhoneCodeExpiredError:
         await event.edit(
@@ -282,6 +308,29 @@ async def process_code_input(event, code):
             f"Введите код с помощью кнопок ниже (6 цифр):\n"
             f"Код: `{''}`",
             buttons=get_code_keyboard()
+        )
+
+# ---------- КНОПКА ВЫХОДА ----------
+@bot_client.on(events.CallbackQuery(data=b'logout'))
+async def logout(event):
+    await event.answer()
+    chat_id = event.chat_id
+    
+    # Если есть активная рассылка - останавливаем
+    if chat_id in spam_tasks and not spam_tasks[chat_id].done():
+        spam_tasks[chat_id].cancel()
+        del spam_tasks[chat_id]
+    
+    # Выполняем выход
+    if logout_user(chat_id):
+        await event.edit(
+            "🚪 Вы успешно вышли из аккаунта.\n\n"
+            "Для повторной авторизации используйте /start"
+        )
+    else:
+        await event.edit(
+            "❌ Ошибка при выходе из аккаунта.\n\n"
+            "Попробуйте перезапустить бота командой /start"
         )
 
 # ---------- ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ----------
@@ -328,13 +377,11 @@ async def password_input(event):
         user_data[chat_id].pop('step', None)
         global user_authorized
         user_authorized = True
-        buttons = [
-            [Button.inline("📂 Загрузить CSV", b'add_users')],
-            [Button.inline("✏️ Настроить шаблоны", b'templates')],
-            [Button.inline("🚀 Запустить рассылку", b'start_spam')],
-            [Button.inline("⏹ Остановить рассылку", b'stop_spam')]
-        ]
-        await event.reply("✅ Пользовательский аккаунт успешно авторизован! Выберите действие:", buttons=buttons)
+        
+        await event.reply(
+            "✅ Пользовательский аккаунт успешно авторизован! Выберите действие:",
+            buttons=get_main_menu()
+        )
     except Exception as e:
         logger.error(f"Ошибка при входе с паролем: {e}", exc_info=True)
         await event.reply(f"❌ Ошибка: {str(e)}. Повторите ввод пароля.")
@@ -346,7 +393,8 @@ async def add_users(event):
     await event.edit(
         "📎 Отправьте мне **CSV-файл** (с разделителем запятая).\n"
         "Ожидаются колонки: `username`, `user_id` (или одна из них).\n"
-        "Если `username` пуст, буду использовать `user_id`."
+        "Если `username` пуст, буду использовать `user_id`.\n\n"
+        "После загрузки файла используйте /start для возврата в меню."
     )
 
 @bot_client.on(events.CallbackQuery(data=b'templates'))
@@ -357,7 +405,8 @@ async def setup_templates(event):
         "`/template Название Текст сообщения`\n\n"
         "Пример:\n"
         "`/template Приветствие Привет, коллега!`\n\n"
-        "Все добавленные шаблоны будут показаны после добавления."
+        "Все добавленные шаблоны будут показаны после добавления.\n\n"
+        "После настройки используйте /start для возврата в меню."
     )
 
 @bot_client.on(events.CallbackQuery(data=b'start_spam'))
@@ -386,7 +435,7 @@ async def add_template(event):
     user_data[chat_id].setdefault('templates', {})[name] = text
     templates = user_data[chat_id]['templates']
     list_templates = "\n".join([f"• {n}: {t}" for n, t in templates.items()]) if templates else "пока нет"
-    await event.reply(f"✅ Шаблон '{name}' добавлен!\n\n📋 Текущие шаблоны:\n{list_templates}")
+    await event.reply(f"✅ Шаблон '{name}' добавлен!\n\n📋 Текущие шаблоны:\n{list_templates}\n\nИспользуйте /start для возврата в меню.")
 
 # ---------- ОБРАБОТКА CSV-ФАЙЛА ----------
 @bot_client.on(events.NewMessage(func=lambda e: e.chat_id in user_data and e.document))
@@ -420,7 +469,8 @@ async def process_csv(event):
         await event.reply(
             f"✅ Загружено {len(recipients)} адресатов.\n"
             f"Из них {missing_username_count} – по user_id (без username).\n"
-            f"Теперь добавьте шаблоны через /template."
+            f"Теперь добавьте шаблоны через /template.\n\n"
+            f"Используйте /start для возврата в меню."
         )
     except Exception as e:
         await event.reply(f"❌ Ошибка при обработке CSV: {str(e)}")
